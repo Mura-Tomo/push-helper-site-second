@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Push Subscribe</title>
+<script>
+const VAPID_PUBLIC_KEY = "BKDYl1tog8AGY9kq9b94ztIroWBw1smpQp5kGTh5-O1Apz3cFSQO_f7kes_ct7QTVtPSYQaaOZv83eV28kprzNk";
+
+function urlB64ToUint8Array(base64String){
+  const padding = "=".repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const output = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; ++i) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+(async () => {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    document.body.textContent = "このブラウザは Web Push に対応していません。";
+    return;
+  }
+  const reg = await navigator.serviceWorker.register("./sw.js", { scope: "./" });
+  let perm = Notification.permission;
+  if (perm !== "granted") perm = await Notification.requestPermission();
+  if (perm !== "granted") {
+    document.body.textContent = "通知が許可されませんでした。";
+    return;
+  }
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY)
+    });
+  }
+  // 親（Gradio ページ）へ購読情報を返す
+  try {
+    window.opener && window.opener.postMessage({ type: "PUSH_SUB", subscription: sub.toJSON() }, "*");
+  } catch (e) {}
+  document.body.innerHTML = "<p>通知が有効化されました。ウィンドウを閉じます…</p>";
+  setTimeout(() => window.close(), 500);
+})();
+</script>
