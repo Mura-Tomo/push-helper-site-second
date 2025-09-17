@@ -1,30 +1,134 @@
 <!doctype html>
 <meta charset="utf-8" />
 <title>Push Subscribe</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;line-height:1.6}
+  h1{font-size:20px;margin:0 0 12px}
+  .card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:12px 0}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .badge{padding:4px 10px;border-radius:999px;font-size:12px;border:1px solid transparent}
+  .ok{background:#e8fff0;border-color:#31a24c;color:#156c2e}
+  .ng{background:#ffeded;border-color:#d13a3a;color:#8a1c1c}
+  .info{background:#eef5ff;border-color:#6a9efb;color:#1e51c7}
+  button{padding:8px 12px;border-radius:10px;border:1px solid #ccc;background:#fff;cursor:pointer}
+  button.primary{background:#1e51c7;color:#fff;border-color:#1e51c7}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  textarea{width:100%;height:120px;border-radius:8px;border:1px solid #ccc;padding:8px;font-family:ui-monospace,Menlo,Consolas,monospace}
+  small{color:#666}
+</style>
+
+<h1>Web Push 設定</h1>
+
+<div class="card">
+  <div class="row">
+    <div>Service Worker:</div>
+    <span id="swStatus" class="badge info">未実行</span>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div>通知権限:</div>
+    <span id="permStatus" class="badge info">未確認</span>
+    <button id="btnPerm" class="primary">通知を許可</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div>Push 購読:</div>
+    <span id="subStatus" class="badge info">未購読</span>
+    <button id="btnSub" class="">Push を購読</button>
+    <button id="btnUnsub">購読解除</button>
+  </div>
+</div>
+
+<div class="card">
+  <div style="margin-bottom:8px">購読 JSON</div>
+  <textarea id="subJson" readonly placeholder="まだ購読がありません"></textarea>
+  <div class="row" style="margin-top:8px">
+    <button id="btnSend" class="primary">Gradio に送信</button>
+    <button id="btnClose">このウィンドウを閉じる</button>
+    <small id="sendHint">※ Gradio 側でこのページを開いた状態なら自動送信も行います。</small>
+  </div>
+</div>
+
 <script>
 const VAPID_PUBLIC_KEY = "BKDYl1tog8AGY9kq9b94ztIroWBw1smpQp5kGTh5-O1Apz3cFSQO_f7kes_ct7QTVtPSYQaaOZv83eV28kprzNk";
 function urlB64ToUint8Array(s){const p="=".repeat((4-s.length%4)%4);const b=(s+p).replace(/-/g,"+").replace(/_/g,"/");const r=atob(b);const a=new Uint8Array(r.length);for(let i=0;i<r.length;i++)a[i]=r.charCodeAt(i);return a;}
 
-(async () => {
+const el = (id)=>document.getElementById(id);
+const swStatus=el("swStatus"), permStatus=el("permStatus"), subStatus=el("subStatus");
+const btnPerm=el("btnPerm"), btnSub=el("btnSub"), btnUnsub=el("btnUnsub");
+const btnSend=el("btnSend"), btnClose=el("btnClose"), subJson=el("subJson");
+
+let reg = null;
+let currentSub = null;
+let openerOrigin = "*";
+try { openerOrigin = new URL(document.referrer).origin; } catch(_) {}
+
+function setBadge(node, cls, text){ node.className = "badge " + cls; node.textContent = text; }
+function refreshPermBadge(){
+  const p = Notification.permission;
+  if (p === "granted") { setBadge(permStatus,"ok","許可済み"); btnPerm.disabled=true; }
+  else if (p === "denied"){ setBadge(permStatus,"ng","拒否"); btnPerm.disabled=true; }
+  else { setBadge(permStatus,"info","要許可"); btnPerm.disabled=false; }
+}
+function refreshSubBadge(){
+  if (currentSub) { setBadge(subStatus,"ok","購読済み"); }
+  else { setBadge(subStatus,"info","未購読"); }
+}
+
+async function ensureSW(){
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-    document.body.textContent = "Web Push 非対応ブラウザです。"; return;
+    setBadge(swStatus,"ng","非対応"); throw new Error("このブラウザは非対応です");
   }
-  const reg = await navigator.serviceWorker.register("./sw.js", { scope: "./" });
-  let perm = Notification.permission;
-  if (perm !== "granted") perm = await Notification.requestPermission();
-  if (perm !== "granted") { document.body.textContent = "通知が許可されませんでした。"; return; }
+  setBadge(swStatus,"info","登録中…");
+  reg = await navigator.serviceWorker.register("./sw.js",{scope:"./"});
+  setBadge(swStatus,"ok","登録完了");
+}
 
-  let sub = await reg.pushManager.getSubscription();
-  if (!sub) {
-    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY) });
+async function loadExistingSub(){
+  currentSub = await reg.pushManager.getSubscription();
+  subJson.value = currentSub ? JSON.stringify(currentSub.toJSON(), null, 2) : "";
+  refreshSubBadge();
+}
+
+async function requestPermission(){
+  if (Notification.permission !== "granted") {
+    await Notification.requestPermission();
+    refreshPermBadge();
   }
+}
 
-  // ✅ 親(Gradio共有ページ)のオリジンへ返す
-  let openerOrigin = "*";
-  try { openerOrigin = new URL(document.referrer).origin; } catch(_) {}
-  try { window.opener && window.opener.postMessage({ type: "PUSH_SUB", subscription: sub.toJSON() }, openerOrigin); } catch(_) {}
+async function subscribe(){
+  await requestPermission();
+  if (Notification.permission !== "granted") return;
+  currentSub = await reg.pushManager.subscribe({
+    userVisibleOnly:true,
+    applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY)
+  });
+  subJson.value = JSON.stringify(currentSub.toJSON(), null, 2);
+  refreshSubBadge();
+  // 自動送信（Gradio側へ）
+  try { window.opener && window.opener.postMessage({type:"PUSH_SUB", subscription: currentSub.toJSON()}, openerOrigin); } catch(_){}
+}
 
-  document.body.innerHTML = "<p>通知が有効化されました。ウィンドウを閉じます…</p>";
-  setTimeout(() => window.close(), 500);
+async function unsubscribe(){
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) await sub.unsubscribe();
+  currentSub = null; subJson.value=""; refreshSubBadge();
+}
+
+btnPerm.onclick = requestPermission;
+btnSub.onclick = subscribe;
+btnUnsub.onclick = unsubscribe;
+btnSend.onclick = ()=>{ if(currentSub){ try{ window.opener && window.opener.postMessage({type:"PUSH_SUB", subscription: currentSub.toJSON()}, openerOrigin);}catch(_){} } };
+btnClose.onclick = ()=> window.close();
+
+(async () => {
+  try {
+    await ensureSW();
+    refreshPermBadge();
+    await loadExistingSub();
+    // 既存購読があっても画面で確認できる（自動クローズしない）
+  } catch (e) {
+    console.error(e);
+    // 失敗でも UI は残す
+  }
 })();
 </script>
